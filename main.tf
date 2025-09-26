@@ -1,4 +1,5 @@
-```hcl
+````hcl 
+
 provider "aws" {
   region = "us-west-1"
 }
@@ -137,3 +138,4 @@ resource "aws_instance" "private_instance" {
     Name = "${local.env}-private-instance"
   }
 }
+````
