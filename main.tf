@@ -1,138 +1,126 @@
+#############################################
+# Provider Configuration
+#############################################
 provider "aws" {
-  region = "us-west-1"
+  region = "ap-west-1" 
 }
 
-locals {
-  env = terraform.workspace
+#############################################
+# EKS Cluster IAM Role
+#############################################
+resource "aws_iam_role" "cluster_role" {
+  name = "eks-cluster-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "sts:AssumeRole",
+          "sts:TagSession"
+        ]
+        Effect = "Allow"
+        Principal = {
+          Service = "eks.amazonaws.com" # EKS will assume this role
+        }
+      },
+    ]
+  })
 }
 
-# VPC 
-resource "aws_vpc" "main" {
-  cidr_block           = var.vpc_cidr
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-  tags = {
-    Name = "${local.env}-vpc"
+# Attach the required policy to the cluster role
+resource "aws_iam_role_policy_attachment" "cluster_AmazonEKSClusterPolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+  role       = aws_iam_role.cluster_role.name
+}
+
+#############################################
+# Networking (using default VPC & subnets)
+#############################################
+
+# Fetch default VPC
+data "aws_vpc" "default_vpc" {
+  default = true
+}
+
+# Fetch all subnets inside the default VPC
+data "aws_subnets" "default_subnets" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.default_vpc.id]
   }
 }
 
-# Subnets 
-resource "aws_subnet" "public" {
-  vpc_id                  = aws_vpc.main.id
-  cidr_block              = var.public_subnet_cidr
-  map_public_ip_on_launch = true
-  availability_zone       = var.az1
-  tags = {
-    Name = "${local.env}-public-subnet"
+#############################################
+# EKS Cluster Definition
+#############################################
+resource "aws_eks_cluster" "mycluster" {
+  name     = "mycluster"
+  role_arn = aws_iam_role.cluster_role.arn
+  # version = "1.31"   # Optional: specify EKS version
+
+  vpc_config {
+    subnet_ids = data.aws_subnets.default_subnets.ids
   }
+
+  depends_on = [
+    aws_iam_role_policy_attachment.cluster_AmazonEKSClusterPolicy,
+  ]
 }
 
-resource "aws_subnet" "private" {
-  vpc_id            = aws_vpc.main.id
-  cidr_block        = var.private_subnet_cidr
-  availability_zone = var.az2
-  tags = {
-    Name = "${local.env}-private-subnet"
-  }
+#############################################
+# EKS Node Group IAM Role
+#############################################
+resource "aws_iam_role" "nodegroup_role" {
+  name = "eks-node-group"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "ec2.amazonaws.com" # EC2 nodes (workers) assume this role
+      }
+    }]
+  })
 }
 
-# Internet Gateway 
-resource "aws_internet_gateway" "igw" {
-  vpc_id = aws_vpc.main.id
-  tags = {
-    Name = "${local.env}-igw"
-  }
+# Attach required policies for node group role
+resource "aws_iam_role_policy_attachment" "nodegroup_AmazonEKSWorkerNodePolicy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+  role       = aws_iam_role.nodegroup_role.name
 }
 
-# Route Tables 
-resource "aws_route_table" "public_rt" {
-  vpc_id = aws_vpc.main.id
-  tags = {
-    Name = "${local.env}-public-rt"
-  }
+resource "aws_iam_role_policy_attachment" "nodegroup_AmazonEKS_CNI_Policy" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+  role       = aws_iam_role.nodegroup_role.name
 }
 
-resource "aws_route" "public_internet" {
-  route_table_id         = aws_route_table.public_rt.id
-  destination_cidr_block = "0.0.0.0/0"
-  gateway_id             = aws_internet_gateway.igw.id
+resource "aws_iam_role_policy_attachment" "nodegroup_AmazonEC2ContainerRegistryReadOnly" {
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+  role       = aws_iam_role.nodegroup_role.name
 }
 
-resource "aws_route_table_association" "public_assoc" {
-  subnet_id      = aws_subnet.public.id
-  route_table_id = aws_route_table.public_rt.id
-}
+#############################################
+# EKS Node Group
+#############################################
+resource "aws_eks_node_group" "node_group" {
+  cluster_name    = aws_eks_cluster.mycluster.name
+  node_group_name = "mynode"
+  node_role_arn   = aws_iam_role.nodegroup_role.arn
+  subnet_ids      = data.aws_subnets.default_subnets.ids
 
-resource "aws_route_table" "private_rt" {
-  vpc_id = aws_vpc.main.id
-  tags = {
-    Name = "${local.env}-private-rt"
-  }
-}
-
-resource "aws_route_table_association" "private_assoc" {
-  subnet_id      = aws_subnet.private.id
-  route_table_id = aws_route_table.private_rt.id
-}
-
-# Security Group 
-resource "aws_security_group" "ec2_sg" {
-  name        = "${local.env}-ec2-sg"
-  description = "Allow SSH + HTTP"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description = "SSH"
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  scaling_config {
+    desired_size = 1
+    max_size     = 1
+    min_size     = 1
   }
 
-  ingress {
-    description = "HTTP"
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name = "${local.env}-sg"
-  }
-}
-
-# EC2 Instances 
-
-# Public instance
-resource "aws_instance" "public_instance" {
-  ami                    = var.ami
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
-  key_name               = var.keypair
-
-  tags = {
-    Name = "${local.env}-public-instance"
-  }
-}
-
-# Private instance
-resource "aws_instance" "private_instance" {
-  ami                    = var.ami
-  instance_type          = var.instance_type
-  subnet_id              = aws_subnet.private.id
-  vpc_security_group_ids = [aws_security_group.ec2_sg.id]
-  key_name               = var.keypair
-
-  tags = {
-    Name = "${local.env}-private-instance"
-  }
+  # Ensure IAM Role permissions exist before node group creation
+  depends_on = [
+    aws_iam_role_policy_attachment.nodegroup_AmazonEKSWorkerNodePolicy,
+    aws_iam_role_policy_attachment.nodegroup_AmazonEKS_CNI_Policy,
+    aws_iam_role_policy_attachment.nodegroup_AmazonEC2ContainerRegistryReadOnly,
+  ]
 }
