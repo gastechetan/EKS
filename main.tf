@@ -2,7 +2,7 @@
 # Provider Configuration
 #############################################
 provider "aws" {
-  region = "ap-sout-1" 
+  region = "ap-south-1" 
 }
 
 #############################################
